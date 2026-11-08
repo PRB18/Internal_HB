@@ -36,7 +36,7 @@ function publicOrder(order, role) {
 }
 
 function defaultStore() {
-  return { users: [], clients: [], orders: [] };
+  return { users: [], clients: [], orders: [], inventory: [] };
 }
 function normalizeOrder(order) {
   const appointment = order.appointment && typeof order.appointment === 'object' ? order.appointment : {};
@@ -58,6 +58,7 @@ function loadStore() {
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.users) || !Array.isArray(parsed.clients) || !Array.isArray(parsed.orders)) {
     throw new Error(`Invalid data store format in ${DATA_FILE}.`);
   }
+  if (!Array.isArray(parsed.inventory)) parsed.inventory = [];
   parsed.orders = parsed.orders.map(normalizeOrder);
   return parsed;
 }
@@ -145,6 +146,29 @@ app.post('/api/clients', requireAuth, (req, res) => {
   saveStore();
   res.status(201).json({ client });
 });
+app.patch('/api/clients/:name', requireAuth, (req, res) => {
+  const client = store.clients.find((candidate) => candidate.nameKey === normalizeName(req.params.name));
+  if (!client) return res.status(404).json({ error: 'Client not found.' });
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  const name = String(body.name ?? client.name).trim();
+  const nameKey = normalizeName(name);
+  if (!name) return validationError(res, 'Client name is required.');
+  if (nameKey !== client.nameKey && store.clients.some((candidate) => candidate.nameKey === nameKey)) return res.status(409).json({ error: 'A client with this name already exists.' });
+  store.orders.filter((order) => order.clientNameKey === client.nameKey).forEach((order) => { order.clientName = name; order.clientNameKey = nameKey; });
+  Object.assign(client, { name, nameKey, phone: String(body.phone ?? client.phone).trim(), email: String(body.email ?? client.email).trim(), notes: String(body.notes ?? client.notes).trim(), updatedAt: now() });
+  saveStore();
+  res.json({ client });
+});
+app.delete('/api/clients/:name', requireAuth, (req, res) => {
+  const index = store.clients.findIndex((candidate) => candidate.nameKey === normalizeName(req.params.name));
+  if (index < 0) return res.status(404).json({ error: 'Client not found.' });
+  const client = store.clients[index];
+  if (store.orders.some((order) => order.clientNameKey === client.nameKey)) return res.status(409).json({ error: 'Move or delete this client’s orders before deleting the client.' });
+  store.clients.splice(index, 1);
+  saveStore();
+  res.json({ ok: true });
+});
 app.get('/api/clients/:name', requireAuth, (req, res) => {
   const client = store.clients.find((candidate) => candidate.nameKey === normalizeName(req.params.name));
   if (!client) return res.status(404).json({ error: 'Client not found.' });
@@ -194,6 +218,17 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
   const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
   if (!body) return validationError(res, 'A JSON object is required.');
   order.appointment = order.appointment && typeof order.appointment === 'object' ? order.appointment : { date: '', state: 'scheduled' };
+  if (body.clientName !== undefined) {
+    const client = store.clients.find((candidate) => candidate.nameKey === normalizeName(body.clientName));
+    if (!client) return validationError(res, 'Client not found.');
+    order.clientName = client.name;
+    order.clientNameKey = client.nameKey;
+  }
+  if (body.garment !== undefined) {
+    order.garment = String(body.garment).trim();
+    if (!order.garment) return validationError(res, 'Garment details are required.');
+  }
+  if (body.notes !== undefined) order.notes = String(body.notes).trim();
   if (body.workshopStage !== undefined) {
     if (!WORKSHOP_STAGES.includes(body.workshopStage)) return validationError(res, 'Unknown workshop stage.');
     order.workshopStage = body.workshopStage;
@@ -212,6 +247,47 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
   order.updatedAt = now();
   saveStore();
   res.json({ order: publicOrder(order, req.session.user.role) });
+});
+app.delete('/api/orders/:id', requireAuth, (req, res) => {
+  const index = store.orders.findIndex((candidate) => candidate.id === req.params.id);
+  if (index < 0) return res.status(404).json({ error: 'Order not found.' });
+  store.orders.splice(index, 1);
+  saveStore();
+  res.json({ ok: true });
+});
+
+app.get('/api/inventory', requireAuth, (req, res) => res.json({ inventory: store.inventory.slice().sort((a, b) => a.name.localeCompare(b.name)) }));
+app.post('/api/inventory', requireAuth, (req, res) => {
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  const name = String(body.name || '').trim();
+  const quantity = Number(body.quantity ?? 0);
+  if (!name) return validationError(res, 'Material name is required.');
+  if (!Number.isFinite(quantity) || quantity < 0) return validationError(res, 'Quantity must be a non-negative number.');
+  const item = { id: id(), name, category: String(body.category || 'Fabric').trim(), unit: String(body.unit || 'm').trim(), quantity, reorderAt: Math.max(0, Number(body.reorderAt ?? 0)), supplier: String(body.supplier || '').trim(), notes: String(body.notes || '').trim(), createdAt: now(), updatedAt: now() };
+  store.inventory.push(item);
+  saveStore();
+  res.status(201).json({ item });
+});
+app.patch('/api/inventory/:id', requireAuth, (req, res) => {
+  const item = store.inventory.find((candidate) => candidate.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'Inventory item not found.' });
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  const quantity = Number(body.quantity ?? item.quantity);
+  const reorderAt = Number(body.reorderAt ?? item.reorderAt);
+  if (!Number.isFinite(quantity) || quantity < 0 || !Number.isFinite(reorderAt) || reorderAt < 0) return validationError(res, 'Quantities must be non-negative numbers.');
+  Object.assign(item, { name: String(body.name ?? item.name).trim(), category: String(body.category ?? item.category).trim(), unit: String(body.unit ?? item.unit).trim(), quantity, reorderAt, supplier: String(body.supplier ?? item.supplier).trim(), notes: String(body.notes ?? item.notes).trim(), updatedAt: now() });
+  if (!item.name) return validationError(res, 'Material name is required.');
+  saveStore();
+  res.json({ item });
+});
+app.delete('/api/inventory/:id', requireAuth, (req, res) => {
+  const index = store.inventory.findIndex((candidate) => candidate.id === req.params.id);
+  if (index < 0) return res.status(404).json({ error: 'Inventory item not found.' });
+  store.inventory.splice(index, 1);
+  saveStore();
+  res.json({ ok: true });
 });
 
 app.get('/api/meta', requireAuth, (req, res) => res.json({ workshopStages: WORKSHOP_STAGES, appointmentStates: APPOINTMENT_STATES, role: req.session.user.role }));
