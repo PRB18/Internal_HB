@@ -45,6 +45,9 @@ function normalizeOrder(order) {
     clientNameKey: order.clientNameKey || normalizeName(order.clientName),
     workshopStage: WORKSHOP_STAGES.includes(order.workshopStage) ? order.workshopStage : 'Material',
     delivered: Boolean(order.delivered) || order.workshopStage === 'Delivered',
+    orderDate: String(order.orderDate || order.createdAt || '').slice(0, 10),
+    trialDate: String(order.trialDate || order.appointment?.date || '').slice(0, 10),
+    deliveryDate: String(order.deliveryDate || '').slice(0, 10),
     appointment: {
       date: String(appointment.date || '').trim(),
       state: APPOINTMENT_STATES.includes(appointment.state) ? appointment.state : 'scheduled'
@@ -204,7 +207,7 @@ app.post('/api/orders', requireAuth, (req, res) => {
   if (!garment) return validationError(res, 'Garment details are required.');
   const order = {
     id: id(), clientName: client.name, clientNameKey, garment, notes: String(body.notes || '').trim(),
-    workshopStage: 'Material', delivered: false, appointment: { date: String(body.appointmentDate || '').trim(), state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
+    workshopStage: 'Material', delivered: false, orderDate: String(body.orderDate || now()).slice(0, 10), trialDate: String(body.trialDate || '').trim(), deliveryDate: String(body.deliveryDate || '').trim(), appointment: { date: String(body.trialDate || '').trim(), state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
     materials: [], careInstructions: String(body.careInstructions || '').trim(),
     totalAmount: req.session.user.role === 'admin' ? Number(body.totalAmount || 0) : 0,
     advancePaid: req.session.user.role === 'admin' ? Number(body.advancePaid || 0) : 0,
@@ -238,6 +241,9 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
     order.workshopStage = body.workshopStage;
     order.delivered = body.workshopStage === 'Delivered';
   }
+  if (body.orderDate !== undefined) order.orderDate = String(body.orderDate).trim();
+  if (body.trialDate !== undefined) { order.trialDate = String(body.trialDate).trim(); order.appointment.date = order.trialDate; }
+  if (body.deliveryDate !== undefined) order.deliveryDate = String(body.deliveryDate).trim();
   if (body.appointmentDate !== undefined) order.appointment.date = String(body.appointmentDate).trim();
   if (body.appointmentState !== undefined) {
     if (!APPOINTMENT_STATES.includes(body.appointmentState)) return validationError(res, 'Unknown appointment state.');
@@ -351,4 +357,4 @@ if (require.main === module) {
   start().catch((error) => { console.error(error); process.exitCode = 1; });
 }
 
-module.exports = { app, appointmentStatus, publicOrder, WORKSHOP_STAGES, start, ensureAdmin };
+module.exports = { app, appointmentStatus, normalizeOrder, publicOrder, WORKSHOP_STAGES, start, ensureAdmin };
