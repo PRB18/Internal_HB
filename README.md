@@ -2,7 +2,7 @@
 
 Internal HB is a shared atelier operations workspace for clients, orders, appointments, measurements, workshop progress, and delivery status.
 
-The Vercel deployment exposes the Express API through `api/[...path].js`. The current JSON file store and in-memory sessions are suitable for local evaluation, but production use should migrate these to a durable database and shared session store.
+The Vercel deployment exposes the Express API through `api/index.js` and the explicit `vercel.json` API route. The current JSON file store and in-memory sessions are suitable for local evaluation, but production use should migrate these to a durable database and shared session store.
 
 ## Deploy to Vercel
 
