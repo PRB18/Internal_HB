@@ -1,0 +1,21 @@
+{
+  "name": "internal-hb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Internal HB shared atelier operations workspace",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "helmet": "^8.3.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
