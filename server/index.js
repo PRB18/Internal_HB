@@ -48,7 +48,9 @@ function normalizeOrder(order) {
     appointment: {
       date: String(appointment.date || '').trim(),
       state: APPOINTMENT_STATES.includes(appointment.state) ? appointment.state : 'scheduled'
-    }
+    },
+    materials: Array.isArray(order.materials) ? order.materials : [],
+    careInstructions: String(order.careInstructions || '').trim()
   };
 }
 function loadStore() {
@@ -141,7 +143,7 @@ app.post('/api/clients', requireAuth, (req, res) => {
   const nameKey = normalizeName(name);
   if (!name) return validationError(res, 'Client name is required.');
   if (store.clients.some((client) => client.nameKey === nameKey)) return res.status(409).json({ error: 'A client with this name already exists.' });
-  const client = { id: id(), name, nameKey, phone: String(body.phone || '').trim(), email: String(body.email || '').trim(), notes: String(body.notes || '').trim(), measurements: {}, measurementUnit: 'in', createdAt: now(), updatedAt: now() };
+  const client = { id: id(), name, nameKey, phone: String(body.phone || '').trim(), email: String(body.email || '').trim(), notes: String(body.notes || '').trim(), careNotes: String(body.careNotes || '').trim(), measurements: {}, measurementUnit: 'in', createdAt: now(), updatedAt: now() };
   store.clients.push(client);
   saveStore();
   res.status(201).json({ client });
@@ -156,7 +158,7 @@ app.patch('/api/clients/:name', requireAuth, (req, res) => {
   if (!name) return validationError(res, 'Client name is required.');
   if (nameKey !== client.nameKey && store.clients.some((candidate) => candidate.nameKey === nameKey)) return res.status(409).json({ error: 'A client with this name already exists.' });
   store.orders.filter((order) => order.clientNameKey === client.nameKey).forEach((order) => { order.clientName = name; order.clientNameKey = nameKey; });
-  Object.assign(client, { name, nameKey, phone: String(body.phone ?? client.phone).trim(), email: String(body.email ?? client.email).trim(), notes: String(body.notes ?? client.notes).trim(), updatedAt: now() });
+  Object.assign(client, { name, nameKey, phone: String(body.phone ?? client.phone).trim(), email: String(body.email ?? client.email).trim(), notes: String(body.notes ?? client.notes).trim(), careNotes: String(body.careNotes ?? client.careNotes ?? '').trim(), updatedAt: now() });
   saveStore();
   res.json({ client });
 });
@@ -203,6 +205,7 @@ app.post('/api/orders', requireAuth, (req, res) => {
   const order = {
     id: id(), clientName: client.name, clientNameKey, garment, notes: String(body.notes || '').trim(),
     workshopStage: 'Material', delivered: false, appointment: { date: String(body.appointmentDate || '').trim(), state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
+    materials: [], careInstructions: String(body.careInstructions || '').trim(),
     totalAmount: req.session.user.role === 'admin' ? Number(body.totalAmount || 0) : 0,
     advancePaid: req.session.user.role === 'admin' ? Number(body.advancePaid || 0) : 0,
     createdAt: now(), updatedAt: now()
@@ -229,6 +232,7 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
     if (!order.garment) return validationError(res, 'Garment details are required.');
   }
   if (body.notes !== undefined) order.notes = String(body.notes).trim();
+  if (body.careInstructions !== undefined) order.careInstructions = String(body.careInstructions).trim();
   if (body.workshopStage !== undefined) {
     if (!WORKSHOP_STAGES.includes(body.workshopStage)) return validationError(res, 'Unknown workshop stage.');
     order.workshopStage = body.workshopStage;
@@ -251,9 +255,43 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
 app.delete('/api/orders/:id', requireAuth, (req, res) => {
   const index = store.orders.findIndex((candidate) => candidate.id === req.params.id);
   if (index < 0) return res.status(404).json({ error: 'Order not found.' });
+  (store.orders[index].materials || []).forEach((material) => {
+    const item = store.inventory.find((candidate) => candidate.id === material.inventoryId);
+    if (item) item.quantity += material.quantity;
+  });
   store.orders.splice(index, 1);
   saveStore();
   res.json({ ok: true });
+});
+app.post('/api/orders/:id/materials', requireAuth, (req, res) => {
+  const order = store.orders.find((candidate) => candidate.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  const quantity = Number(body?.quantity);
+  const item = store.inventory.find((candidate) => candidate.id === body?.inventoryId);
+  if (!item) return validationError(res, 'Inventory item not found.');
+  if (!Number.isFinite(quantity) || quantity <= 0) return validationError(res, 'Material quantity must be greater than zero.');
+  if (item.quantity < quantity) return validationError(res, `${item.name} only has ${item.quantity} ${item.unit} available.`);
+  order.materials = Array.isArray(order.materials) ? order.materials : [];
+  if (order.materials.some((material) => material.inventoryId === item.id)) return res.status(409).json({ error: 'This material is already assigned to the order.' });
+  item.quantity -= quantity;
+  order.materials.push({ inventoryId: item.id, name: item.name, quantity, unit: item.unit });
+  order.updatedAt = now();
+  saveStore();
+  res.status(201).json({ order: publicOrder(order, req.session.user.role), item });
+});
+app.delete('/api/orders/:id/materials/:inventoryId', requireAuth, (req, res) => {
+  const order = store.orders.find((candidate) => candidate.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found.' });
+  const index = (order.materials || []).findIndex((material) => material.inventoryId === req.params.inventoryId);
+  if (index < 0) return res.status(404).json({ error: 'Material assignment not found.' });
+  const material = order.materials[index];
+  const item = store.inventory.find((candidate) => candidate.id === material.inventoryId);
+  if (item) item.quantity += material.quantity;
+  order.materials.splice(index, 1);
+  order.updatedAt = now();
+  saveStore();
+  res.json({ order: publicOrder(order, req.session.user.role) });
 });
 
 app.get('/api/inventory', requireAuth, (req, res) => res.json({ inventory: store.inventory.slice().sort((a, b) => a.name.localeCompare(b.name)) }));
