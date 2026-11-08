@@ -205,4 +205,4 @@ if (require.main === module) {
   start().catch((error) => { console.error(error); process.exitCode = 1; });
 }
 
-module.exports = { app, appointmentStatus, publicOrder, WORKSHOP_STAGES, start };
+module.exports = { app, appointmentStatus, publicOrder, WORKSHOP_STAGES, start, ensureAdmin };
