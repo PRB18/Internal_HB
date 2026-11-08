@@ -2,7 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { appointmentStatus, normalizeOrder, publicOrder } = require('../server/index');
+const { appointmentStatus, normalizeOrder, publicOrder, WORKSHOP_STAGES } = require('../server/index');
+
+test('workshop stages match the 9-stage house workflow', () => {
+  assert.deepEqual(WORKSHOP_STAGES, [
+    'Material', 'Cutting', 'Embroidery', 'Hand Work', 'Stitching', 'Fitting', 'Finishing', 'Presentation', 'Delivered'
+  ]);
+});
 
 test('scheduled appointment becomes pending after its date', () => {
   assert.equal(appointmentStatus({ state: 'scheduled', date: '2020-01-01' }), 'pending');
@@ -46,4 +52,16 @@ test('order normalization preserves client workflow dates and custom garment', (
   assert.equal(order.orderDate, '2026-11-08');
   assert.equal(order.trialDate, '2026-11-15');
   assert.equal(order.deliveryDate, '2026-12-01');
+  assert.equal(order.workshopStage, 'Material');
+  assert.equal(order.delivered, false);
 });
+
+test('order normalization marks Delivered stage as delivered', () => {
+  const order = normalizeOrder({
+    clientName: 'Ava Khan',
+    garment: 'Navy dinner suit',
+    workshopStage: 'Delivered'
+  });
+  assert.equal(order.delivered, true);
+});
+

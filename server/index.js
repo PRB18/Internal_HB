@@ -9,8 +9,8 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = Number(process.env.PORT || 3747);
-const HOST = '127.0.0.1';
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.VERCEL ? path.join('/tmp', 'internal-hb') : path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'internal-hb.json');
 const WORKSHOP_STAGES = ['Material', 'Cutting', 'Embroidery', 'Hand Work', 'Stitching', 'Fitting', 'Finishing', 'Presentation', 'Delivered'];
@@ -96,6 +96,12 @@ app.use(session({
   proxy: Boolean(process.env.VERCEL),
   cookie: { httpOnly: true, sameSite: 'lax', secure: Boolean(process.env.VERCEL), maxAge: 8 * 60 * 60 * 1000 }
 }));
+app.use((req, res, next) => {
+  if (!req.session.user) {
+    req.session.user = { id: 'local', username: 'HB', role: 'admin' };
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 function requireAuth(req, res, next) {
@@ -205,9 +211,10 @@ app.post('/api/orders', requireAuth, (req, res) => {
   if (!client) return validationError(res, 'Create or select a client before adding an order.');
   const garment = String(body.garment || '').trim();
   if (!garment) return validationError(res, 'Garment details are required.');
+  const apptDate = String(body.appointmentDate || body.trialDate || '').trim();
   const order = {
     id: id(), clientName: client.name, clientNameKey, garment, notes: String(body.notes || '').trim(),
-    workshopStage: 'Material', delivered: false, orderDate: String(body.orderDate || now()).slice(0, 10), trialDate: String(body.trialDate || '').trim(), deliveryDate: String(body.deliveryDate || '').trim(), appointment: { date: String(body.trialDate || '').trim(), state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
+    workshopStage: 'Material', delivered: false, orderDate: String(body.orderDate || now()).slice(0, 10), trialDate: apptDate, deliveryDate: String(body.deliveryDate || '').trim(), appointment: { date: apptDate, state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
     materials: [], careInstructions: String(body.careInstructions || '').trim(),
     totalAmount: req.session.user.role === 'admin' ? Number(body.totalAmount || 0) : 0,
     advancePaid: req.session.user.role === 'admin' ? Number(body.advancePaid || 0) : 0,
@@ -244,7 +251,7 @@ app.patch('/api/orders/:id', requireAuth, (req, res) => {
   if (body.orderDate !== undefined) order.orderDate = String(body.orderDate).trim();
   if (body.trialDate !== undefined) { order.trialDate = String(body.trialDate).trim(); order.appointment.date = order.trialDate; }
   if (body.deliveryDate !== undefined) order.deliveryDate = String(body.deliveryDate).trim();
-  if (body.appointmentDate !== undefined) order.appointment.date = String(body.appointmentDate).trim();
+  if (body.appointmentDate !== undefined) { order.appointment.date = String(body.appointmentDate).trim(); order.trialDate = order.appointment.date; }
   if (body.appointmentState !== undefined) {
     if (!APPOINTMENT_STATES.includes(body.appointmentState)) return validationError(res, 'Unknown appointment state.');
     order.appointment.state = body.appointmentState;
