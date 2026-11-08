@@ -17,6 +17,10 @@ test('explicit appointment states take precedence over date', () => {
   assert.equal(appointmentStatus({ state: 'postponed', date: '2020-01-01' }), 'postponed');
 });
 
+test('invalid appointment dates do not become pending', () => {
+  assert.equal(appointmentStatus({ state: 'scheduled', date: 'not-a-date' }), 'scheduled');
+});
+
 test('staff order projection excludes financial fields', () => {
   const order = publicOrder({ id: '1', totalAmount: 100, advancePaid: 50, appointment: null }, 'staff');
   assert.equal('totalAmount' in order, false);

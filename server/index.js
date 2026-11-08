@@ -23,7 +23,7 @@ function appointmentStatus(appointment) {
   if (!appointment) return 'pending';
   if (appointment.state === 'completed') return 'completed';
   if (appointment.state === 'postponed') return 'postponed';
-  if (appointment.date && new Date(`${appointment.date}T23:59:59`) < new Date()) return 'pending';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(appointment.date) && new Date(`${appointment.date}T23:59:59.999Z`) < new Date()) return 'pending';
   return 'scheduled';
 }
 function publicOrder(order, role) {
@@ -38,10 +38,28 @@ function publicOrder(order, role) {
 function defaultStore() {
   return { users: [], clients: [], orders: [] };
 }
+function normalizeOrder(order) {
+  const appointment = order.appointment && typeof order.appointment === 'object' ? order.appointment : {};
+  return {
+    ...order,
+    clientNameKey: order.clientNameKey || normalizeName(order.clientName),
+    workshopStage: WORKSHOP_STAGES.includes(order.workshopStage) ? order.workshopStage : 'Material',
+    delivered: Boolean(order.delivered) || order.workshopStage === 'Delivered',
+    appointment: {
+      date: String(appointment.date || '').trim(),
+      state: APPOINTMENT_STATES.includes(appointment.state) ? appointment.state : 'scheduled'
+    }
+  };
+}
 function loadStore() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) return defaultStore();
-  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8').replace(/^\uFEFF/, ''));
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.users) || !Array.isArray(parsed.clients) || !Array.isArray(parsed.orders)) {
+    throw new Error(`Invalid data store format in ${DATA_FILE}.`);
+  }
+  parsed.orders = parsed.orders.map(normalizeOrder);
+  return parsed;
 }
 let store = loadStore();
 function saveStore() {
@@ -63,12 +81,14 @@ async function ensureAdmin() {
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '100kb' }));
+if (process.env.VERCEL) app.set('trust proxy', 1);
 app.use(session({
   name: 'internal_hb_sid',
   secret: process.env.SESSION_SECRET || 'internal-hb-local-change-me',
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'strict', secure: false, maxAge: 8 * 60 * 60 * 1000 }
+  proxy: Boolean(process.env.VERCEL),
+  cookie: { httpOnly: true, sameSite: 'lax', secure: Boolean(process.env.VERCEL), maxAge: 8 * 60 * 60 * 1000 }
 }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -114,11 +134,13 @@ app.get('/api/clients', requireAuth, (req, res) => {
   res.json({ clients: store.clients.map((client) => ({ ...client, orderCount: store.orders.filter((order) => order.clientNameKey === client.nameKey).length })) });
 });
 app.post('/api/clients', requireAuth, (req, res) => {
-  const name = String(req.body?.name || '').trim();
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  const name = String(body.name || '').trim();
   const nameKey = normalizeName(name);
   if (!name) return validationError(res, 'Client name is required.');
   if (store.clients.some((client) => client.nameKey === nameKey)) return res.status(409).json({ error: 'A client with this name already exists.' });
-  const client = { id: id(), name, nameKey, phone: String(req.body.phone || '').trim(), email: String(req.body.email || '').trim(), notes: String(req.body.notes || '').trim(), measurements: {}, measurementUnit: 'in', createdAt: now(), updatedAt: now() };
+  const client = { id: id(), name, nameKey, phone: String(body.phone || '').trim(), email: String(body.email || '').trim(), notes: String(body.notes || '').trim(), measurements: {}, measurementUnit: 'in', createdAt: now(), updatedAt: now() };
   store.clients.push(client);
   saveStore();
   res.status(201).json({ client });
@@ -131,27 +153,34 @@ app.get('/api/clients/:name', requireAuth, (req, res) => {
 app.patch('/api/clients/:name/measurements', requireAuth, (req, res) => {
   const client = store.clients.find((candidate) => candidate.nameKey === normalizeName(req.params.name));
   if (!client) return res.status(404).json({ error: 'Client not found.' });
-  if (!req.body || typeof req.body.values !== 'object' || Array.isArray(req.body.values)) return validationError(res, 'Measurement values must be a form object.');
-  client.measurements = Object.fromEntries(Object.entries(req.body.values).map(([key, value]) => [String(key).trim(), String(value).trim()]).filter(([key]) => key));
-  client.measurementUnit = req.body.unit === 'cm' ? 'cm' : 'in';
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body || typeof body.values !== 'object' || Array.isArray(body.values)) return validationError(res, 'Measurement values must be a form object.');
+  client.measurements = Object.fromEntries(Object.entries(body.values).map(([key, value]) => [String(key).trim(), String(value).trim()]).filter(([key]) => key));
+  client.measurementUnit = body.unit === 'cm' ? 'cm' : 'in';
   client.updatedAt = now();
   saveStore();
   res.json({ client });
 });
 
-app.get('/api/orders', requireAuth, (req, res) => res.json({ orders: store.orders.filter((order) => !order.delivered).map((order) => publicOrder(order, req.session.user.role)) }));
+app.get('/api/orders', requireAuth, (req, res) => {
+  const includeDelivered = req.query.includeDelivered === 'true';
+  const orders = includeDelivered ? store.orders : store.orders.filter((order) => !order.delivered);
+  res.json({ orders: orders.map((order) => publicOrder(order, req.session.user.role)) });
+});
 app.post('/api/orders', requireAuth, (req, res) => {
-  const clientName = String(req.body?.clientName || '').trim();
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  const clientName = String(body.clientName || '').trim();
   const clientNameKey = normalizeName(clientName);
   const client = store.clients.find((candidate) => candidate.nameKey === clientNameKey);
   if (!client) return validationError(res, 'Create or select a client before adding an order.');
-  const garment = String(req.body?.garment || '').trim();
+  const garment = String(body.garment || '').trim();
   if (!garment) return validationError(res, 'Garment details are required.');
   const order = {
-    id: id(), clientName: client.name, clientNameKey, garment, notes: String(req.body.notes || '').trim(),
-    workshopStage: 'Material', delivered: false, appointment: { date: String(req.body.appointmentDate || '').trim(), state: APPOINTMENT_STATES.includes(req.body.appointmentState) ? req.body.appointmentState : 'scheduled' },
-    totalAmount: req.session.user.role === 'admin' ? Number(req.body.totalAmount || 0) : 0,
-    advancePaid: req.session.user.role === 'admin' ? Number(req.body.advancePaid || 0) : 0,
+    id: id(), clientName: client.name, clientNameKey, garment, notes: String(body.notes || '').trim(),
+    workshopStage: 'Material', delivered: false, appointment: { date: String(body.appointmentDate || '').trim(), state: APPOINTMENT_STATES.includes(body.appointmentState) ? body.appointmentState : 'scheduled' },
+    totalAmount: req.session.user.role === 'admin' ? Number(body.totalAmount || 0) : 0,
+    advancePaid: req.session.user.role === 'admin' ? Number(body.advancePaid || 0) : 0,
     createdAt: now(), updatedAt: now()
   };
   if (!Number.isFinite(order.totalAmount) || !Number.isFinite(order.advancePaid) || order.totalAmount < 0 || order.advancePaid < 0) return validationError(res, 'Financial values must be non-negative numbers.');
@@ -162,19 +191,22 @@ app.post('/api/orders', requireAuth, (req, res) => {
 app.patch('/api/orders/:id', requireAuth, (req, res) => {
   const order = store.orders.find((candidate) => candidate.id === req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found.' });
-  if (req.body.workshopStage !== undefined) {
-    if (!WORKSHOP_STAGES.includes(req.body.workshopStage)) return validationError(res, 'Unknown workshop stage.');
-    order.workshopStage = req.body.workshopStage;
-    order.delivered = req.body.workshopStage === 'Delivered';
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  if (!body) return validationError(res, 'A JSON object is required.');
+  order.appointment = order.appointment && typeof order.appointment === 'object' ? order.appointment : { date: '', state: 'scheduled' };
+  if (body.workshopStage !== undefined) {
+    if (!WORKSHOP_STAGES.includes(body.workshopStage)) return validationError(res, 'Unknown workshop stage.');
+    order.workshopStage = body.workshopStage;
+    order.delivered = body.workshopStage === 'Delivered';
   }
-  if (req.body.appointmentDate !== undefined) order.appointment.date = String(req.body.appointmentDate).trim();
-  if (req.body.appointmentState !== undefined) {
-    if (!APPOINTMENT_STATES.includes(req.body.appointmentState)) return validationError(res, 'Unknown appointment state.');
-    order.appointment.state = req.body.appointmentState;
+  if (body.appointmentDate !== undefined) order.appointment.date = String(body.appointmentDate).trim();
+  if (body.appointmentState !== undefined) {
+    if (!APPOINTMENT_STATES.includes(body.appointmentState)) return validationError(res, 'Unknown appointment state.');
+    order.appointment.state = body.appointmentState;
   }
   if (req.session.user.role === 'admin') {
-    if (req.body.totalAmount !== undefined) order.totalAmount = Number(req.body.totalAmount);
-    if (req.body.advancePaid !== undefined) order.advancePaid = Number(req.body.advancePaid);
+    if (body.totalAmount !== undefined) order.totalAmount = Number(body.totalAmount);
+    if (body.advancePaid !== undefined) order.advancePaid = Number(body.advancePaid);
     if (!Number.isFinite(order.totalAmount) || !Number.isFinite(order.advancePaid) || order.totalAmount < 0 || order.advancePaid < 0) return validationError(res, 'Financial values must be non-negative numbers.');
   }
   order.updatedAt = now();
